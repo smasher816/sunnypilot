@@ -6,8 +6,11 @@ from opendbc.car.toyota.values import DBC, ToyotaFlags
 from opendbc.car.interfaces import RadarInterfaceBase
 
 
-def _create_radar_can_parser(CP):
-  if CP.flags & ToyotaFlags.TSS2:
+def _create_radar_can_parser(CP, use_ars510=False):
+  if use_ars510:
+    RADAR_A_MSGS = [0x235, 0x237]
+    RADAR_B_MSGS = [0x239]
+  elif CP.flags & ToyotaFlags.TSS2:
     RADAR_A_MSGS = list(range(0x180, 0x190))
     RADAR_B_MSGS = list(range(0x190, 0x1a0))
   else:
@@ -18,7 +21,8 @@ def _create_radar_can_parser(CP):
   msg_b_n = len(RADAR_B_MSGS)
   messages = list(zip(RADAR_A_MSGS + RADAR_B_MSGS, [20] * (msg_a_n + msg_b_n), strict=True))
 
-  messages.append(('STATUS_MSG', 10))
+  if not use_ars510:
+    messages.append(('STATUS_MSG', 10))
 
   return CANParser(DBC[CP.carFingerprint][Bus.radar], messages, 1)
 
@@ -27,7 +31,11 @@ class RadarInterface(RadarInterfaceBase):
   def __init__(self, CP, CP_SP):
     super().__init__(CP, CP_SP)
 
-    if CP.flags & ToyotaFlags.TSS2:
+    self.use_ars510 = CP.flags & ToyotaFlags.RADAR_ACC # XXX: Is this correct?
+    if self.use_ars510:
+      self.RADAR_A_MSGS = [0x235, 0x237]
+      self.RADAR_B_MSGS = [0x239]
+    elif CP.flags & ToyotaFlags.TSS2:
       self.RADAR_A_MSGS = list(range(0x180, 0x190))
       self.RADAR_B_MSGS = list(range(0x190, 0x1a0))
     else:
@@ -36,8 +44,9 @@ class RadarInterface(RadarInterfaceBase):
 
     self.valid_cnt = {key: 0 for key in self.RADAR_A_MSGS}
 
-    self.rcp = None if CP.radarUnavailable else _create_radar_can_parser(CP)
+    self.rcp = None if CP.radarUnavailable else _create_radar_can_parser(CP, self.use_ars510)
     self.trigger_msg = self.RADAR_B_MSGS[-1]
+    self.ars510_cycle = 0
     self.updated_messages = set()
 
   def update(self, can_strings):
@@ -46,6 +55,15 @@ class RadarInterface(RadarInterfaceBase):
 
     vls = self.rcp.update(can_strings)
     self.updated_messages.update(vls)
+
+    if not self.rcp.can_valid:
+      ret = RadarData()
+      ret.errors.canError = True
+      return ret
+
+    # Wait for a new radar cycle before updating
+    if self.use_ars510 and self.rcp.vl['ACC_TARGET_3']['TIMESTAMP'] == self.ars510_cycle:
+      return None
 
     if self.trigger_msg not in self.updated_messages:
       return None
@@ -57,38 +75,50 @@ class RadarInterface(RadarInterfaceBase):
 
   def _update(self, updated_messages):
     ret = RadarData()
-    if not self.rcp.can_valid:
-      ret.errors.canError = True
 
-    if self.rcp.vl['STATUS_MSG']['RADAR_STATUS'] != 1 or self.rcp.vl['STATUS_MSG']['RADAR_PRE_FAULT'] != 0:
-      ret.errors.radarUnavailableTemporary = True
+    if self.use_ars510:
+      self.ars510_cycle = self.rcp.vl['ACC_TARGET_3']['TIMESTAMP']
+      if self.rcp.vl["ACC_TARGET_1"]["STATE"] == 5 and self.rcp.vl["ACC_TARGET_2"]["PRESENT"]:  # 1 = idle, with every field zero
+        pt = RadarData.RadarPoint()
+        pt.trackId = int(self.rcp.vl["ACC_TARGET_1"]["TARGET_ID"])
+        pt.dRel = self.rcp.vl["ACC_TARGET_2"]["LONG_DIST"]
+        pt.yRel = self.rcp.vl["ACC_TARGET_2"]["LAT_DIST"]
+        pt.vRel = self.rcp.vl["ACC_TARGET_1"]["REL_SPEED"]
+        # pt.aRel = self.rcp.vl["ACC_TARGET_1"]["REL_ACCEL"]
+        # pt.yvRel = self.rcp.vl["ACC_TARGET_1"]["LAT_SPEED"]
+        ret.points = [pt]  # assigned as a list: forks with capnp-backed structs (sunnypilot) take list assignment only
 
-    for ii in sorted(updated_messages):
-      if ii in self.RADAR_A_MSGS:
-        cpt = self.rcp.vl[ii]
+    else:
+      if self.rcp.vl['STATUS_MSG']['RADAR_STATUS'] != 1 or self.rcp.vl['STATUS_MSG']['RADAR_PRE_FAULT'] != 0:
+        ret.errors.radarUnavailableTemporary = True
 
-        if cpt['LONG_DIST'] >= 255 or cpt['NEW_TRACK']:
-          self.valid_cnt[ii] = 0    # reset counter
-        if cpt['VALID'] and cpt['LONG_DIST'] < 255:
-          self.valid_cnt[ii] += 1
-        else:
-          self.valid_cnt[ii] = max(self.valid_cnt[ii] - 1, 0)
+      for ii in sorted(updated_messages):
+        if ii in self.RADAR_A_MSGS:
+          cpt = self.rcp.vl[ii]
 
-        score = self.rcp.vl[ii+16]['SCORE']
-        # print ii, self.valid_cnt[ii], score, cpt['VALID'], cpt['LONG_DIST'], cpt['LAT_DIST']
+          if cpt['LONG_DIST'] >= 255 or cpt['NEW_TRACK']:
+            self.valid_cnt[ii] = 0    # reset counter
+          if cpt['VALID'] and cpt['LONG_DIST'] < 255:
+            self.valid_cnt[ii] += 1
+          else:
+            self.valid_cnt[ii] = max(self.valid_cnt[ii] - 1, 0)
 
-        # radar point only valid if it's a valid measurement and score is above 50
-        if cpt['VALID'] or (score > 50 and cpt['LONG_DIST'] < 255 and self.valid_cnt[ii] > 0):
-          if ii not in self.pts or cpt['NEW_TRACK']:
-            self.pts[ii] = RadarData.RadarPoint()
-            self.pts[ii].trackId = self.track_id
-            self.track_id += 1
-          self.pts[ii].dRel = cpt['LONG_DIST']  # from front of car
-          self.pts[ii].yRel = -cpt['LAT_DIST']  # in car frame's y axis, left is positive
-          self.pts[ii].vRel = cpt['REL_SPEED']
-        else:
-          if ii in self.pts:
-            del self.pts[ii]
+          score = self.rcp.vl[ii+16]['SCORE']
+          # print ii, self.valid_cnt[ii], score, cpt['VALID'], cpt['LONG_DIST'], cpt['LAT_DIST']
 
-    ret.points = list(self.pts.values())
+          # radar point only valid if it's a valid measurement and score is above 50
+          if cpt['VALID'] or (score > 50 and cpt['LONG_DIST'] < 255 and self.valid_cnt[ii] > 0):
+            if ii not in self.pts or cpt['NEW_TRACK']:
+              self.pts[ii] = RadarData.RadarPoint()
+              self.pts[ii].trackId = self.track_id
+              self.track_id += 1
+            self.pts[ii].dRel = cpt['LONG_DIST']  # from front of car
+            self.pts[ii].yRel = -cpt['LAT_DIST']  # in car frame's y axis, left is positive
+            self.pts[ii].vRel = cpt['REL_SPEED']
+          else:
+            if ii in self.pts:
+              del self.pts[ii]
+
+      ret.points = list(self.pts.values())
+
     return ret

@@ -81,7 +81,10 @@ class ToyotaFlags(IntFlag):
 
 
 def dbc_dict(pt, radar):
-  return {Bus.pt: pt, Bus.radar: radar}
+  if radar is not None:
+    return {Bus.pt: pt, Bus.radar: radar}
+  else:
+    return {Bus.pt: pt}
 
 
 class Footnote(Enum):
@@ -109,9 +112,6 @@ class ToyotaTSS2PlatformConfig(PlatformConfig):
   def init(self):
     self.flags |= ToyotaFlags.TSS2 | ToyotaFlags.NO_STOP_TIMER | ToyotaFlags.NO_DSU
 
-    if self.flags & ToyotaFlags.RADAR_ACC:
-      self.dbc_dict = {Bus.pt: 'toyota_nodsu_pt_generated'}
-
 
 @dataclass
 class ToyotaSecOCPlatformConfig(PlatformConfig):
@@ -119,9 +119,6 @@ class ToyotaSecOCPlatformConfig(PlatformConfig):
 
   def init(self):
     self.flags |= ToyotaFlags.TSS2 | ToyotaFlags.NO_STOP_TIMER | ToyotaFlags.NO_DSU | ToyotaFlags.SECOC
-
-    if self.flags & ToyotaFlags.RADAR_ACC:
-      self.dbc_dict = {Bus.pt: 'toyota_secoc_pt_generated'}
 
 
 class CAR(Platforms):
@@ -187,6 +184,7 @@ class CAR(Platforms):
       ToyotaCarDocs("Toyota C-HR Hybrid 2021-22"),
     ],
     TOYOTA_CHR.specs,
+    dbc_dict('toyota_nodsu_pt_generated', None),
     flags=ToyotaFlags.RADAR_ACC,
   )
   TOYOTA_COROLLA = PlatformConfig(
@@ -277,6 +275,7 @@ class CAR(Platforms):
       ToyotaCarDocs("Toyota RAV4 Hybrid 2022", video="https://youtu.be/U0nH9cnrFB0"),
     ],
     TOYOTA_RAV4_TSS2.specs,
+    dbc_dict('toyota_nodsu_pt_generated', 'toyota_tss2_ars510'),
     flags=ToyotaFlags.RADAR_ACC,
   )
   TOYOTA_RAV4_TSS2_2023 = ToyotaTSS2PlatformConfig(
@@ -285,6 +284,7 @@ class CAR(Platforms):
       ToyotaCarDocs("Toyota RAV4 Hybrid 2023-25", video="https://youtu.be/4eIsEq4L4Ng"),
     ],
     TOYOTA_RAV4_TSS2.specs,
+    dbc_dict('toyota_nodsu_pt_generated', 'toyota_tss2_ars510'),
     flags=ToyotaFlags.RADAR_ACC | ToyotaFlags.ANGLE_CONTROL,
   )
   TOYOTA_RAV4_PRIME = ToyotaSecOCPlatformConfig(
@@ -294,6 +294,7 @@ class CAR(Platforms):
   TOYOTA_YARIS = ToyotaSecOCPlatformConfig(
     [ToyotaSecOcCarDocs("Toyota Yaris (Non-US only) 2020, 2023", min_enable_speed=MIN_ACC_SPEED)],
     CarSpecs(mass=1170, wheelbase=2.55, steerRatio=14.80, tireStiffnessFactor=0.5533),
+    dbc_dict('toyota_secoc_pt_generated', None),
     flags=ToyotaFlags.RADAR_ACC,
   )
   TOYOTA_MIRAI = ToyotaTSS2PlatformConfig( # TSS 2.5
