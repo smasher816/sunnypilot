@@ -58,6 +58,7 @@ class CarState(CarStateBase, CarStateExt):
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
     cp_cam = can_parsers[Bus.cam]
+    cp_radar = can_parsers[Bus.radar] if Bus.radar else None
 
     ret = structs.CarState()
     ret_sp = structs.CarStateSP()
@@ -81,6 +82,7 @@ class CarState(CarStateBase, CarStateExt):
     else:
       ret.gasPressed = cp.vl["PCM_CRUISE"]["GAS_RELEASED"] == 0
       can_gear = int(cp.vl["GEAR_PACKET"]["GEAR"])
+      # Note: RADAR_ACC cars need a can filter to prevent DISABLE_RADAR flag and re-enable stockAeb
       if not self.CP.flags & ToyotaFlags.DISABLE_RADAR.value:
         ret.stockAeb = bool(cp_acc.vl["PRE_COLLISION"]["PRECOLLISION_ACTIVE"] and cp_acc.vl["PRE_COLLISION"]["FORCE"] < -1e-5)
 
@@ -154,7 +156,10 @@ class CarState(CarStateBase, CarStateExt):
       conversion_factor = CV.KPH_TO_MS if is_metric else CV.MPH_TO_MS
       ret.cruiseState.speedCluster = cluster_set_speed * conversion_factor
 
-    if self.CP.flags & ToyotaFlags.TSS2 and not self.CP.flags & ToyotaFlags.DISABLE_RADAR.value:
+    if (self.CP.flags & ToyotaFlags.TSS2) and (self.CP.flags & ToyotaFlags.RADAR_ACC):
+      # Bus1 still contains a pcs warning even with radar disabled
+      ret.stockFcw = bool(cp_radar.vl["PCS_STATE"]["PCS_ALARM"])
+    elif self.CP.flags & ToyotaFlags.TSS2 and not self.CP.flags & ToyotaFlags.DISABLE_RADAR.value:
       if not (self.CP_SP.flags & ToyotaFlagsSP.SMART_DSU.value):
         self.acc_type = cp_acc.vl["ACC_CONTROL"]["ACC_TYPE"]
       ret.stockFcw = bool(cp_acc.vl["PCS_HUD"]["FCW"])
